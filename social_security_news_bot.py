@@ -46,7 +46,7 @@ TOPICS = [
 ]
 
 # کانال صبا رسانه — لینک واقعی کانال را اینجا جایگزین کنید
-SABA_CHANNEL_LINE = "کانال صبا رسانه: [لینک کانال]"
+SABA_CHANNEL_LINE = "گروه کارگاه صبا رسانه: [https://t.me/+PPoT3Gae3OszYzg0]"
 
 # فایل ذخیره‌ی لینک‌های قبلاً ارسال‌شده (برای جلوگیری از تکرار خبر)
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_links.json")
