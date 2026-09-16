@@ -395,6 +395,9 @@ def format_telegram_message(item):
 
 def _process_feed(label, raw, seen, new_items, default_source=None):
     """پارس یک پاسخ RSS، فیلتر بر اساس ارتباط موضوعی، و افزودن آیتم‌های جدید. لاگ تشخیصی چاپ می‌کند."""
+    # برخی سرورها (مثل ایلنا) قبل از "<?xml ...?>" یک فاصله/نیولاین اضافه می‌فرستند
+    # که طبق استاندارد XML غیرمجاز است؛ حذفش می‌کنیم تا پارس شکست نخورد.
+    raw = raw.lstrip()
     try:
         root = ET.fromstring(raw)
     except ET.ParseError as e:
