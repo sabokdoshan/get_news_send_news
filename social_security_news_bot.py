@@ -59,13 +59,17 @@ SEARCH_WINDOW = "3d"
 # فیدهای RSS مستقیمِ خبرگزاری‌های ایرانی (منبع اصلی و قابل‌اتکا).
 # این‌ها فیدهای عمومیِ هر خبرگزاری‌اند؛ فیلتر is_relevant() در ادامه
 # فقط خبرهای مرتبط با تأمین اجتماعی/بازنشستگی/کار را از میان آن‌ها جدا می‌کند.
+# نکته: دامنه‌ی tasnimnews.com توسط آمریکا مسدود شده؛ تسنیم به دامنه‌ی .ir منتقل شده.
+# فارس هم فعلاً فید ساده‌ی XML ندارد (نیازمند جاوااسکریپت) و ناپایدار است،
+# به همین دلیل با خبرآنلاین جایگزین شده.
+_TASNIM_PATH = urllib.parse.quote("مهمترین-اخبار-تسنیم")
 DIRECT_RSS_FEEDS = [
     ("ایلنا (کار و تأمین اجتماعی)", "https://www.ilna.ir/rss"),
     ("ایسنا", "https://www.isna.ir/rss"),
     ("ایرنا", "https://www.irna.ir/rss"),
     ("مهر", "https://www.mehrnews.com/rss"),
-    ("تسنیم", "https://www.tasnimnews.com/rss"),
-    ("فارس", "https://www.farsnews.ir/rss"),
+    ("تسنیم", f"https://www.tasnimnews.ir/fa/rss/feed/0/8/0/{_TASNIM_PATH}"),
+    ("خبرآنلاین", "https://www.khabaronline.ir/rss"),
 ]
 
 # کانال صبا رسانه — لینک واقعی کانال را اینجا جایگزین کنید
@@ -83,11 +87,15 @@ GROQ_MODEL = "llama-3.1-8b-instant"  # مدل رایگان و سریع Groq
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 
-# کلمات کلیدی که باید در عنوان/خلاصه باشد تا خبر «مرتبط» تلقی شود
-RELEVANT_KEYWORDS = [
-    "تامین اجتماعی", "تأمین اجتماعی", "بازنشسته", "بازنشستگان", "مستمری",
-    "کارگر", "کارگران", "بیمه شده", "بیمه‌شده", "همسان سازی", "همسان‌سازی",
-    "معیشت", "شستا", "قانون کار",
+# کلمات کلیدی که باید در عنوان/خلاصه باشد تا خبر «مرتبط» تلقی شود.
+# «کارگر» عمداً با (?!دان) همراه شده تا با کلماتی مثل «کارگردان»/«کارگردانی»
+# (که تصادفاً همین حروف را در خود دارند) اشتباه گرفته نشود.
+RELEVANT_PATTERNS = [
+    re.compile(p) for p in [
+        "تامین اجتماعی", "تأمین اجتماعی", "بازنشسته", "بازنشستگان", "مستمری",
+        r"کارگر(?!دان)", "بیمه شده", "بیمه\u200cشده", "همسان سازی", "همسان\u200cسازی",
+        "معیشت", "شستا", "قانون کار",
+    ]
 ]
 
 # عبارات تبلیغاتی/نامرتبط که باید حذف شوند
@@ -179,7 +187,7 @@ def is_relevant(item):
     text = f"{item['title']} {item['summary_raw']}"
     if any(b in text for b in BLOCK_KEYWORDS):
         return False
-    return any(k in text for k in RELEVANT_KEYWORDS)
+    return any(p.search(text) for p in RELEVANT_PATTERNS)
 
 
 def dedupe_key(item):
