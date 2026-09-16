@@ -39,7 +39,12 @@ from datetime import datetime, timezone
 # نکته: عمداً کوتاه و تک/دوکلمه‌ای هستند. گوگل کلمات را با AND ترکیب می‌کند،
 # پس عبارت‌های طولانی (۳-۴ کلمه‌ای) عملاً هیچ نتیجه‌ای برنمی‌گردانند.
 # دقتِ از دست‌رفته‌ی این جست‌وجوی گسترده را تابع is_relevant() در ادامه جبران می‌کند.
-TOPICS = [
+#
+# هشدار شناخته‌شده: گوگل‌نیوز از IPهای دیتاسنتری (مثل رانرهای GitHub Actions)
+# گاهی یک فید معتبر ولی کاملاً خالی برمی‌گرداند (نوعی مسدودسازی ضدِ اسکرپینگ،
+# نه خطای HTTP). به همین دلیل، منابع مستقیمِ خبرگزاری‌ها (پایین‌تر) منبع
+# اصلی و قابل‌اتکاتر محسوب می‌شوند؛ گوگل‌نیوز فقط به‌عنوان پوشش تکمیلی است.
+GOOGLE_TOPICS = [
     "تامین اجتماعی",
     "بازنشستگان",
     "مستمری بگیران",
@@ -48,10 +53,20 @@ TOPICS = [
     "قانون کار",
 ]
 
-# بازه‌ی زمانی جست‌وجو در Google News. عبارت‌های تک‌کلمه‌ای بالا معمولاً
-# در یک روز هم نتیجه دارند، اما برای اطمینان بیشتر ۳ روز گذاشته شده؛
-# دوباره ارسال‌نشدنِ خبر تکراری را dedupe بر اساس لینک تضمین می‌کند.
+# بازه‌ی زمانی جست‌وجو در Google News.
 SEARCH_WINDOW = "3d"
+
+# فیدهای RSS مستقیمِ خبرگزاری‌های ایرانی (منبع اصلی و قابل‌اتکا).
+# این‌ها فیدهای عمومیِ هر خبرگزاری‌اند؛ فیلتر is_relevant() در ادامه
+# فقط خبرهای مرتبط با تأمین اجتماعی/بازنشستگی/کار را از میان آن‌ها جدا می‌کند.
+DIRECT_RSS_FEEDS = [
+    ("ایلنا (کار و تأمین اجتماعی)", "https://www.ilna.ir/rss"),
+    ("ایسنا", "https://www.isna.ir/rss"),
+    ("ایرنا", "https://www.irna.ir/rss"),
+    ("مهر", "https://www.mehrnews.com/rss"),
+    ("تسنیم", "https://www.tasnimnews.com/rss"),
+    ("فارس", "https://www.farsnews.ir/rss"),
+]
 
 # کانال صبا رسانه — لینک واقعی کانال را اینجا جایگزین کنید
 SABA_CHANNEL_LINE = "کانال صبا رسانه: [لینک کانال]"
@@ -78,7 +93,11 @@ RELEVANT_KEYWORDS = [
 # عبارات تبلیغاتی/نامرتبط که باید حذف شوند
 BLOCK_KEYWORDS = ["تخفیف ویژه", "آگهی", "تبلیغ", "فروش ویژه"]
 
-HEADERS = {"User-Agent": "Mozilla/5.0 (SabaMediaBot/1.0; +free-open-source)"}
+HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
+    "Accept": "application/rss+xml, application/xml, text/xml, */*",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -102,7 +121,7 @@ def save_seen(seen):
         json.dump(trimmed, f, ensure_ascii=False)
 
 
-def fetch_rss(query):
+def fetch_google_rss(query):
     """گرفتن فید RSS رایگان Google News برای یک عبارت جستجو، محدود به منابع فارسی/ایران."""
     params = {
         "q": f"{query} when:{SEARCH_WINDOW}",
@@ -117,7 +136,15 @@ def fetch_rss(query):
     return data
 
 
-def parse_items(xml_root):
+def fetch_direct_rss(url):
+    """گرفتن فید RSS عمومی یک خبرگزاری، بدون هیچ پارامتر جست‌وجو."""
+    req = urllib.request.Request(url, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        data = resp.read()
+    return data
+
+
+def parse_items(xml_root, default_source=None):
     items = []
     for item in xml_root.findall(".//item"):
         title_raw = (item.findtext("title") or "").strip()
@@ -131,6 +158,10 @@ def parse_items(xml_root):
         title = title_raw
         if not source and " - " in title_raw:
             title, source = title_raw.rsplit(" - ", 1)
+
+        # برای فیدهای مستقیم خبرگزاری‌ها، نام منبع را از قبل می‌دانیم
+        if not source and default_source:
+            source = default_source
 
         desc = html.unescape(re.sub("<[^<]+?>", "", desc_raw)).strip()
 
@@ -223,39 +254,56 @@ def send_to_telegram(text):
 # اجرای اصلی
 # ---------------------------------------------------------------------------
 
+def _process_feed(label, raw, seen, new_items, default_source=None):
+    """پارس یک پاسخ RSS، فیلتر بر اساس ارتباط موضوعی، و افزودن آیتم‌های جدید. لاگ تشخیصی چاپ می‌کند."""
+    try:
+        root = ET.fromstring(raw)
+    except ET.ParseError as e:
+        # اگر منبع به‌جای RSS یک صفحه‌ی HTML (مثلاً کپچا/خطا) برگردانده باشد
+        print(f"[warn] پاسخ نامعتبر (غیر XML) برای «{label}»: {e}")
+        print("[debug] نمونه‌ی پاسخ:", raw[:200])
+        return
+
+    raw_items = parse_items(root, default_source=default_source)
+    print(f"[debug] «{label}»: {len(raw_items)} آیتم خام دریافت شد")
+    if not raw_items:
+        # کمک به عیب‌یابی: نشان می‌دهد آیا واقعاً فید خالی بوده یا چیز غیرمنتظره برگشته
+        print("[debug] نمونه‌ی پاسخ خام:", raw[:200])
+
+    kept = 0
+    for raw_item in raw_items:
+        if not raw_item["link"] or not is_relevant(raw_item):
+            continue
+        key = dedupe_key(raw_item)
+        if key in seen:
+            continue
+        seen.add(key)
+        new_items.append(raw_item)
+        kept += 1
+    print(f"[debug] «{label}»: {kept} خبر جدید و مرتبط بعد از فیلتر")
+
+
 def main():
     seen = load_seen()
     new_items = []
 
-    for topic in TOPICS:
+    # منبع اصلی: فیدهای مستقیم خبرگزاری‌های ایرانی (بدون محدودیت ضدِ اسکرپینگ گوگل)
+    for name, feed_url in DIRECT_RSS_FEEDS:
         try:
-            raw = fetch_rss(topic)
+            raw = fetch_direct_rss(feed_url)
         except Exception as e:
-            print(f"[warn] خطا در دریافت RSS برای «{topic}»: {e}")
+            print(f"[warn] خطا در دریافت فید «{name}» ({feed_url}): {e}")
             continue
+        _process_feed(name, raw, seen, new_items, default_source=name)
 
+    # منبع تکمیلی: جست‌وجوی گوگل‌نیوز (ممکن است روی برخی سرورها خالی برگردد)
+    for topic in GOOGLE_TOPICS:
         try:
-            root = ET.fromstring(raw)
-        except ET.ParseError as e:
-            # اگر گوگل به‌جای RSS یک صفحه‌ی HTML (مثلاً کپچا) برگردانده باشد
-            print(f"[warn] پاسخ نامعتبر (غیر XML) برای «{topic}»: {e}")
-            print("[debug] نمونه‌ی پاسخ:", raw[:200])
+            raw = fetch_google_rss(topic)
+        except Exception as e:
+            print(f"[warn] خطا در دریافت Google News برای «{topic}»: {e}")
             continue
-
-        raw_items = parse_items(root)
-        print(f"[debug] «{topic}»: {len(raw_items)} آیتم خام دریافت شد")
-
-        kept = 0
-        for raw_item in raw_items:
-            if not raw_item["link"] or not is_relevant(raw_item):
-                continue
-            key = dedupe_key(raw_item)
-            if key in seen:
-                continue
-            seen.add(key)
-            new_items.append(raw_item)
-            kept += 1
-        print(f"[debug] «{topic}»: {kept} خبر جدید و مرتبط بعد از فیلتر")
+        _process_feed(f"Google: {topic}", raw, seen, new_items)
 
     result_items = []
     for it in new_items:
