@@ -156,18 +156,82 @@ def is_too_old(pub_date_str):
 
 
 def shorten_link(url):
-    """کوتاه‌کردن لینک با سرویس رایگان TinyURL (بدون نیاز به کلید/ثبت‌نام).
-    در صورت هر خطایی (قطعی شبکه و ...) خودِ لینک اصلی برگردانده می‌شود."""
-    try:
-        api = "https://tinyurl.com/api-create.php?" + urllib.parse.urlencode({"url": url})
-        req = urllib.request.Request(api, headers=HEADERS)
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            short = resp.read().decode("utf-8").strip()
-        if short.startswith("http"):
-            return short
-    except Exception:
-        pass
+    """کوتاه‌کردن لینک با زنجیره‌ای از سرویس‌های رایگان (بدون نیاز به کلید/ثبت‌نام).
+    اگر سرویس اول جواب نداد یا مسدود بود، خودکار سراغ سرویس بعدی می‌رود؛
+    فقط وقتی هر سه شکست بخورند، خودِ لینک اصلی (کامل) برگردانده می‌شود."""
+    services = [
+        ("TinyURL", "https://tinyurl.com/api-create.php?" + urllib.parse.urlencode({"url": url})),
+        ("is.gd", "https://is.gd/create.php?" + urllib.parse.urlencode({"format": "simple", "url": url})),
+        ("da.gd", "https://da.gd/shorten?" + urllib.parse.urlencode({"url": url})),
+    ]
+    for name, api in services:
+        try:
+            req = urllib.request.Request(api, headers=HEADERS)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                short = resp.read().decode("utf-8").strip()
+            if short.startswith("http") and len(short) < len(url):
+                return short
+            print(f"[warn] سرویس کوتاه‌کننده {name} پاسخ نامعتبر داد: {short[:150]}")
+        except Exception as e:
+            print(f"[warn] سرویس کوتاه‌کننده {name} شکست خورد: {e}")
+    print("[warn] هر سه سرویس کوتاه‌کننده‌ی لینک شکست خوردند؛ لینک کامل ارسال می‌شود.")
     return url
+
+
+# نام ماه‌های شمسی، برای نمایش تاریخ به‌شکل آشنا برای مخاطب فارسی‌زبان
+_JALALI_MONTHS = [
+    "فروردین", "اردیبهشت", "خرداد", "تیر", "مرداد", "شهریور",
+    "مهر", "آبان", "آذر", "دی", "بهمن", "اسفند",
+]
+_PERSIAN_DIGITS = str.maketrans("0123456789", "۰۱۲۳۴۵۶۷۸۹")
+
+
+def _gregorian_to_jalali(gy, gm, gd):
+    """تبدیل تاریخ میلادی به شمسی (الگوریتم استاندارد و متن‌باز، بدون نیاز به کتابخانه‌ی جانبی)."""
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    if gy > 1600:
+        jy = 979
+        gy -= 1600
+    else:
+        jy = 0
+        gy -= 621
+    gy2 = gy + 1 if gm > 2 else gy
+    days = (365 * gy) + ((gy2 + 3) // 4) - ((gy2 + 99) // 100) + ((gy2 + 399) // 400) - 80 + gd + g_d_m[gm - 1]
+    jy += 33 * (days // 12053)
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        jm = 1 + days // 31
+        jd = 1 + (days % 31)
+    else:
+        jm = 7 + (days - 186) // 30
+        jd = 1 + ((days - 186) % 30)
+    return jy, jm, jd
+
+
+def format_persian_datetime(pub_date_str):
+    """تبدیل تاریخ RSS (میلادی/GMT) به شمسی و ساعت تهران، با اعداد فارسی."""
+    if not pub_date_str:
+        return ""
+    try:
+        dt = parsedate_to_datetime(pub_date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        try:
+            from zoneinfo import ZoneInfo
+            tehran = dt.astimezone(ZoneInfo("Asia/Tehran"))
+        except Exception:
+            # اگر دیتابیس منطقه‌ی زمانی روی رانر موجود نبود، آفست ثابت +۳:۳۰ را دستی اعمال می‌کنیم
+            tehran = dt.astimezone(timezone(timedelta(hours=3, minutes=30)))
+        jy, jm, jd = _gregorian_to_jalali(tehran.year, tehran.month, tehran.day)
+        text = f"{jd} {_JALALI_MONTHS[jm - 1]} {jy} - ساعت {tehran.strftime('%H:%M')}"
+        return text.translate(_PERSIAN_DIGITS)
+    except Exception:
+        return pub_date_str  # در صورت هر خطای غیرمنتظره، حداقل تاریخ خام نمایش داده شود
 
 
 def fetch_google_rss(query):
@@ -237,16 +301,18 @@ def dedupe_key(item):
 
 
 def fallback_summary(item):
-    """خلاصه‌ی استخراجی ساده وقتی کلید LLM موجود نیست (بدون هیچ سرویس پولی)."""
-    base = item["summary_raw"] or item["title"]
+    """خلاصه‌ی استخراجی ساده وقتی کلید LLM موجود نیست (بدون هیچ سرویس پولی).
+    عمداً تیتر را در متن تکرار نمی‌کند (چون تیتر جداگانه در پیام نمایش داده می‌شود).
+    نکته‌ی صادقانه: بدون کلید Groq، ممکن است این خلاصه به ۸۰ کلمه نرسد، چون
+    فید RSS خبرگزاری‌ها معمولاً فقط یک یا دو جمله‌ی کوتاه (لید خبر) می‌دهد،
+    نه متن کامل. برای خلاصه‌ی تضمینی ۸۰-۱۲۰ کلمه‌ای، تنظیم GROQ_API_KEY لازم است."""
+    base = (item["summary_raw"] or "").strip()
+    if not base:
+        return "خلاصه‌ای از منبع در دسترس نبود؛ برای جزئیات کامل به لینک خبر مراجعه کنید."
     words = base.split()
-    if len(words) < 40:
-        # اگر خلاصه‌ی فید کوتاه است، عنوان را هم اضافه می‌کنیم تا به حداقل کلمات نزدیک شود
-        base = f"{item['title']}. {base}"
-        words = base.split()
     summary = " ".join(words[:120])
     if len(words) < 80:
-        summary += " (برای جزئیات کامل به لینک خبر مراجعه کنید.)"
+        summary += " (برای جزئیات بیشتر به لینک خبر مراجعه کنید.)"
     return summary
 
 
@@ -301,16 +367,20 @@ def send_to_telegram(text):
 
 
 def format_telegram_message(item):
-    """پیام شکیل و حرفه‌ای برای تلگرام؛ از HTML parse mode تلگرام استفاده می‌کند."""
+    """پیام شکیل و حرفه‌ای برای تلگرام؛ از HTML parse mode تلگرام استفاده می‌کند.
+    ترتیب: تیتر (بولد) → خلاصه → منبع و تاریخ → لینک کوتاه → امضای صبا رسانه."""
     title = html.escape(item["title"])
     summary = html.escape(item["summary"])
     source = html.escape(item["source"])
+    persian_date = format_persian_datetime(item.get("date", ""))
     short_link = shorten_link(item["link"])
 
     return (
         f"📰 <b>{title}</b>\n\n"
         f"{summary}\n\n"
+        f"—————————————\n"
         f"🗞 منبع: {source}\n"
+        f"🕒 تاریخ: {persian_date}\n"
         f"🔗 {short_link}\n"
         f"—————————————\n"
         f"📡 صبا رسانه\n"
