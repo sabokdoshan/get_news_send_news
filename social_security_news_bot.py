@@ -29,7 +29,8 @@ import hashlib
 import urllib.request
 import urllib.parse
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from datetime import datetime, timezone, timedelta
 
 # ---------------------------------------------------------------------------
 # تنظیمات
@@ -53,8 +54,14 @@ GOOGLE_TOPICS = [
     "قانون کار",
 ]
 
-# بازه‌ی زمانی جست‌وجو در Google News.
-SEARCH_WINDOW = "3d"
+# بازه‌ی زمانی جست‌وجو در Google News (این منبع فعلاً تکمیلی/غیرفعال است، رجوع کنید به یادداشت بالا).
+SEARCH_WINDOW = "1d"
+
+# حداکثر سن مجاز خبر بر حسب ساعت. صرف‌نظر از تکراری‌بودن یا نبودن، هر خبری
+# که از تاریخ انتشارش بیشتر از این مقدار گذشته باشد نادیده گرفته می‌شود.
+# این تضمین می‌کند حتی اگر اجرای خودکار چند روز متوقف شده باشد، فقط اخبار
+# واقعاً تازه (نه انباشته‌شده‌ی چندروزه) ارسال شود.
+MAX_NEWS_AGE_HOURS = 24
 
 # فیدهای RSS مستقیمِ خبرگزاری‌های ایرانی (منبع اصلی و قابل‌اتکا).
 # این‌ها فیدهای عمومیِ هر خبرگزاری‌اند؛ فیلتر is_relevant() در ادامه
@@ -72,8 +79,10 @@ DIRECT_RSS_FEEDS = [
     ("خبرآنلاین", "https://www.khabaronline.ir/rss"),
 ]
 
-# کانال صبا رسانه — لینک واقعی کانال را اینجا جایگزین کنید
-SABA_CHANNEL_LINE = "کانال صبا رسانه: [لینک کانال]"
+# هویت کانال صبا رسانه، برای درج در پایان هر خبر
+SABA_ID = "@saba_rasanehh"
+SABA_LINK = "https://t.me/saba_rasanehh"
+SABA_CHANNEL_LINE = f"کانال صبا رسانه: {SABA_ID} ({SABA_LINK})"
 
 # فایل ذخیره‌ی لینک‌های قبلاً ارسال‌شده (برای جلوگیری از تکرار خبر)
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_links.json")
@@ -127,6 +136,38 @@ def save_seen(seen):
     trimmed = list(seen)[-5000:]
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(trimmed, f, ensure_ascii=False)
+
+
+def is_too_old(pub_date_str):
+    """بررسی می‌کند آیا خبر از MAX_NEWS_AGE_HOURS قدیمی‌تر است یا نه.
+    اگر تاریخ قابل‌تفسیر نبود، برای احتیاط خبر را قدیمی در نظر نمی‌گیریم
+    (یعنی اجازه می‌دهیم رد شود، چون بهتر است یک خبر مشکوک نمایش داده شود
+    تا اینکه به‌خاطر یک تاریخ ناقص، کل خبر گم شود)."""
+    if not pub_date_str:
+        return False
+    try:
+        dt = parsedate_to_datetime(pub_date_str)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        age = datetime.now(timezone.utc) - dt
+        return age > timedelta(hours=MAX_NEWS_AGE_HOURS)
+    except Exception:
+        return False
+
+
+def shorten_link(url):
+    """کوتاه‌کردن لینک با سرویس رایگان TinyURL (بدون نیاز به کلید/ثبت‌نام).
+    در صورت هر خطایی (قطعی شبکه و ...) خودِ لینک اصلی برگردانده می‌شود."""
+    try:
+        api = "https://tinyurl.com/api-create.php?" + urllib.parse.urlencode({"url": url})
+        req = urllib.request.Request(api, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            short = resp.read().decode("utf-8").strip()
+        if short.startswith("http"):
+            return short
+    except Exception:
+        pass
+    return url
 
 
 def fetch_google_rss(query):
@@ -249,13 +290,33 @@ def send_to_telegram(text):
     data = urllib.parse.urlencode({
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text,
-        "disable_web_page_preview": "false",
+        "parse_mode": "HTML",
+        "disable_web_page_preview": "true",
     }).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     try:
         urllib.request.urlopen(req, timeout=20)
     except Exception as e:
         print(f"[warn] ارسال به تلگرام ناموفق بود: {e}")
+
+
+def format_telegram_message(item):
+    """پیام شکیل و حرفه‌ای برای تلگرام؛ از HTML parse mode تلگرام استفاده می‌کند."""
+    title = html.escape(item["title"])
+    summary = html.escape(item["summary"])
+    source = html.escape(item["source"])
+    short_link = shorten_link(item["link"])
+
+    return (
+        f"📰 <b>{title}</b>\n\n"
+        f"{summary}\n\n"
+        f"🗞 منبع: {source}\n"
+        f"🔗 {short_link}\n"
+        f"—————————————\n"
+        f"📡 صبا رسانه\n"
+        f"🆔 {SABA_ID}\n"
+        f"🔗 {SABA_LINK}"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -279,8 +340,12 @@ def _process_feed(label, raw, seen, new_items, default_source=None):
         print("[debug] نمونه‌ی پاسخ خام:", raw[:200])
 
     kept = 0
+    too_old = 0
     for raw_item in raw_items:
         if not raw_item["link"] or not is_relevant(raw_item):
+            continue
+        if is_too_old(raw_item["date"]):
+            too_old += 1
             continue
         key = dedupe_key(raw_item)
         if key in seen:
@@ -288,7 +353,7 @@ def _process_feed(label, raw, seen, new_items, default_source=None):
         seen.add(key)
         new_items.append(raw_item)
         kept += 1
-    print(f"[debug] «{label}»: {kept} خبر جدید و مرتبط بعد از فیلتر")
+    print(f"[debug] «{label}»: {kept} خبر جدید و مرتبط بعد از فیلتر (و {too_old} خبر قدیمی‌تر از {MAX_NEWS_AGE_HOURS} ساعت کنار گذاشته شد)")
 
 
 def main():
@@ -334,15 +399,9 @@ def main():
     output_json = json.dumps({"items": result_items}, ensure_ascii=False, indent=2)
     print(output_json)
 
-    # آماده‌سازی پیام متنی برای تلگرام (اختیاری)
+    # آماده‌سازی و ارسال پیام شکیل به تلگرام
     for it in result_items:
-        msg = (
-            f"📰 {it['title']}\n"
-            f"منبع: {it['source']} | تاریخ: {it['date']}\n\n"
-            f"{it['summary']}\n\n"
-            f"لینک: {it['link']}\n"
-            f"{it['channel']}"
-        )
+        msg = format_telegram_message(it)
         send_to_telegram(msg)
 
 
