@@ -52,9 +52,7 @@ GOOGLE_TOPICS = [
     "شستا",
     "بیمه شدگان",
     "قانون کار",
-    "کارگران",
-    "قانون کار",
-  ]
+]
 
 # بازه‌ی زمانی جست‌وجو در Google News (این منبع فعلاً تکمیلی/غیرفعال است، رجوع کنید به یادداشت بالا).
 SEARCH_WINDOW = "1d"
@@ -269,6 +267,44 @@ def fetch_direct_rss(url):
     return data
 
 
+# فضای‌نام استاندارد Media RSS (برای <media:content> و <media:thumbnail>)
+MEDIA_RSS_NS = "{http://search.yahoo.com/mrss/}"
+
+
+def extract_image(item_el, desc_raw_html):
+    """پیدا کردن تصویر خبر با پوشش هر سه روش رایج در RSS:
+    ۱) <enclosure url="..." type="image/...">   (استاندارد RSS 2.0)
+    ۲) <media:content url="..." medium="image"> یا <media:thumbnail url="...">
+    ۳) یک تگ <img src="..."> داخل خودِ description
+    هر روشی که اول جواب بدهد استفاده می‌شود؛ اگر هیچ‌کدام نبود None برمی‌گردد
+    (یعنی این خبر تصویر ندارد و باید به‌صورت متنی معمولی ارسال شود)."""
+    enclosure = item_el.find("enclosure")
+    if enclosure is not None:
+        url = enclosure.get("url")
+        type_ = enclosure.get("type", "")
+        if url and (not type_ or type_.startswith("image")):
+            return url
+
+    media_content = item_el.find(f"{MEDIA_RSS_NS}content")
+    if media_content is not None:
+        url = media_content.get("url")
+        medium = media_content.get("medium", "")
+        type_ = media_content.get("type", "")
+        if url and (medium == "image" or type_.startswith("image") or not medium):
+            return url
+
+    media_thumb = item_el.find(f"{MEDIA_RSS_NS}thumbnail")
+    if media_thumb is not None and media_thumb.get("url"):
+        return media_thumb.get("url")
+
+    if desc_raw_html:
+        m = re.search(r'<img[^>]+src="([^"]+)"', desc_raw_html)
+        if m:
+            return m.group(1)
+
+    return None
+
+
 def parse_items(xml_root, default_source=None):
     items = []
     for item in xml_root.findall(".//item"):
@@ -288,6 +324,7 @@ def parse_items(xml_root, default_source=None):
         if not source and default_source:
             source = default_source
 
+        image_url = extract_image(item, desc_raw)
         desc = html.unescape(re.sub("<[^<]+?>", "", desc_raw)).strip()
 
         items.append({
@@ -296,6 +333,7 @@ def parse_items(xml_root, default_source=None):
             "date": pub_date,
             "summary_raw": desc,
             "link": link,
+            "image": image_url,
         })
     return items
 
@@ -362,8 +400,9 @@ def llm_summary(item):
 
 
 def send_to_telegram(text):
+    """ارسال پیام متنی معمولی (بدون عکس)."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+        return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     data = urllib.parse.urlencode({
         "chat_id": TELEGRAM_CHAT_ID,
@@ -373,13 +412,83 @@ def send_to_telegram(text):
     }).encode("utf-8")
     req = urllib.request.Request(url, data=data, method="POST")
     try:
-        urllib.request.urlopen(req, timeout=20)
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        if result.get("ok"):
+            return True
+        print(f"[warn] ارسال پیام متنی به تلگرام رد شد: {result}")
+        return False
     except Exception as e:
         print(f"[warn] ارسال به تلگرام ناموفق بود: {e}")
+        return False
+
+
+def send_photo_to_telegram(image_url, caption_html):
+    """ارسال عکس با کپشن. اگر تلگرام نتواند لینک عکس را دریافت کند (لینک
+    خراب، غیرقابل‌دسترس، فرمت پشتیبانی‌نشده و ...)، False برمی‌گرداند تا
+    فراخوان بتواند بدون از دست‌دادن خبر، به ارسال متنی معمولی برگردد."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+    data = urllib.parse.urlencode({
+        "chat_id": TELEGRAM_CHAT_ID,
+        "photo": image_url,
+        "caption": caption_html,
+        "parse_mode": "HTML",
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        if result.get("ok"):
+            return True
+        print(f"[warn] ارسال عکس به تلگرام رد شد: {result}")
+        return False
+    except Exception as e:
+        print(f"[warn] ارسال عکس به تلگرام با خطا مواجه شد: {e}")
+        return False
+
+
+# حداکثر طول مجاز کپشن تلگرام برای پیام‌های همراه با عکس (محدودیت خودِ API تلگرام)
+TELEGRAM_CAPTION_LIMIT = 1024
+
+
+def build_caption_html(item):
+    """کپشن مخصوص حالت عکس‌دار: فقط تیتر + خلاصه + لینک. منبع/تاریخ/امضا
+    عمداً اینجا نیستند چون در یک پیام کوتاه جداگانه‌ی بعد از عکس می‌آیند —
+    این‌طوری معمولاً کاملاً زیر ۱۰۲۴ کاراکتر می‌ماند. اگر با این حال زیاد
+    بود، فقط بخشی از خلاصه (نه تیتر، نه لینک) کوتاه می‌شود."""
+    title = html.escape(item["title"])
+    summary = html.escape(item["summary"])
+    short_link = shorten_link(item["link"])
+
+    def build(s):
+        return f"📰 <b>{title}</b>\n\n{s}\n\n🔗 {short_link}"
+
+    caption = build(summary)
+    if len(caption) > TELEGRAM_CAPTION_LIMIT:
+        overflow = len(caption) - TELEGRAM_CAPTION_LIMIT + 1  # +1 برای «…»
+        trimmed = summary[: max(0, len(summary) - overflow)] + "…"
+        caption = build(trimmed)
+    return caption[:TELEGRAM_CAPTION_LIMIT]
+
+
+def build_footer_html(item):
+    """پیام کوتاه بعد از عکس: منبع، تاریخ، و امضای صبا رسانه."""
+    source = html.escape(item["source"])
+    persian_date = format_persian_datetime(item.get("date", ""))
+    return (
+        f"🗞 منبع: {source}\n"
+        f"🕒 تاریخ: {persian_date}\n"
+        f"—————————————\n"
+        f"📡 صبا رسانه\n"
+        f"🆔 {SABA_ID}\n"
+        f"🔗 {SABA_LINK}"
+    )
 
 
 def format_telegram_message(item):
-    """پیام شکیل و حرفه‌ای برای تلگرام؛ از HTML parse mode تلگرام استفاده می‌کند.
+    """پیام کامل و شکیل برای حالت بدون عکس؛ از HTML parse mode تلگرام استفاده می‌کند.
     ترتیب: تیتر (بولد) → خلاصه → منبع و تاریخ → لینک کوتاه → امضای صبا رسانه."""
     title = html.escape(item["title"])
     summary = html.escape(item["summary"])
@@ -399,6 +508,23 @@ def format_telegram_message(item):
         f"🆔 {SABA_ID}\n"
         f"🔗 {SABA_LINK}"
     )
+
+
+def send_news_item(item):
+    """مسیر ارسال یک خبر: اگر عکس دارد، عکس+کپشن و بعد یک پیام کوتاه امضا
+    ارسال می‌شود؛ اگر عکس ندارد یا ارسال عکس با هر دلیلی شکست بخورد
+    (لینک خراب، تایم‌اوت، فرمت نامعتبر و ...)، بدون از دست‌رفتن خبر،
+    به ارسال متنیِ کاملِ معمولی برمی‌گردیم."""
+    image_url = item.get("image")
+    if image_url:
+        caption = build_caption_html(item)
+        if send_photo_to_telegram(image_url, caption):
+            send_to_telegram(build_footer_html(item))
+            return
+        print("[warn] ارسال عکس شکست خورد؛ به‌جای آن پیام متنی کامل ارسال می‌شود.")
+    send_to_telegram(format_telegram_message(item))
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -472,6 +598,7 @@ def main():
             "summary": llm_summary(it),
             "link": it["link"],
             "channel": SABA_CHANNEL_LINE,
+            "image": it.get("image"),
         })
 
     save_seen(seen)
@@ -484,10 +611,9 @@ def main():
     output_json = json.dumps({"items": result_items}, ensure_ascii=False, indent=2)
     print(output_json)
 
-    # آماده‌سازی و ارسال پیام شکیل به تلگرام
+    # ارسال هر خبر: با عکس (در صورت وجود) یا به‌صورت متنی
     for it in result_items:
-        msg = format_telegram_message(it)
-        send_to_telegram(msg)
+        send_news_item(it)
 
 
 if __name__ == "__main__":
