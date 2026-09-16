@@ -36,22 +36,25 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------------------
 
 # موضوعات مورد نظر برای جستجو در Google News (فارسی، محدود به منابع ایرانی)
+# نکته: عمداً کوتاه و تک/دوکلمه‌ای هستند. گوگل کلمات را با AND ترکیب می‌کند،
+# پس عبارت‌های طولانی (۳-۴ کلمه‌ای) عملاً هیچ نتیجه‌ای برنمی‌گردانند.
+# دقتِ از دست‌رفته‌ی این جست‌وجوی گسترده را تابع is_relevant() در ادامه جبران می‌کند.
 TOPICS = [
-    "تامین اجتماعی بازنشستگان",
-    "مستمری بگیران تامین اجتماعی",
-    "همسان سازی حقوق بازنشستگان",
-    "قانون کار تامین اجتماعی",
-    "بیمه شدگان تامین اجتماعی درمان",
-    "شستا هلدینگ",
-    "کانون عالی",
-    "ا",
-      "کارگر",
-  "بازنشسته",
-  
+    "تامین اجتماعی",
+    "بازنشستگان",
+    "مستمری بگیران",
+    "شستا",
+    "بیمه شدگان",
+    "قانون کار",
 ]
 
+# بازه‌ی زمانی جست‌وجو در Google News. عبارت‌های تک‌کلمه‌ای بالا معمولاً
+# در یک روز هم نتیجه دارند، اما برای اطمینان بیشتر ۳ روز گذاشته شده؛
+# دوباره ارسال‌نشدنِ خبر تکراری را dedupe بر اساس لینک تضمین می‌کند.
+SEARCH_WINDOW = "3d"
+
 # کانال صبا رسانه — لینک واقعی کانال را اینجا جایگزین کنید
-SABA_CHANNEL_LINE = "گروه کارگاه صبا رسانه: [https://t.me/+PPoT3Gae3OszYzg0]"
+SABA_CHANNEL_LINE = "کانال صبا رسانه: [لینک کانال]"
 
 # فایل ذخیره‌ی لینک‌های قبلاً ارسال‌شده (برای جلوگیری از تکرار خبر)
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_links.json")
@@ -69,7 +72,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
 RELEVANT_KEYWORDS = [
     "تامین اجتماعی", "تأمین اجتماعی", "بازنشسته", "بازنشستگان", "مستمری",
     "کارگر", "کارگران", "بیمه شده", "بیمه‌شده", "همسان سازی", "همسان‌سازی",
-    "معیشت", "شستا", "قانون کار",    "ا","کارگر" , "بازنشسته","بازنشستگان"
+    "معیشت", "شستا", "قانون کار",
 ]
 
 # عبارات تبلیغاتی/نامرتبط که باید حذف شوند
@@ -101,12 +104,17 @@ def save_seen(seen):
 
 def fetch_rss(query):
     """گرفتن فید RSS رایگان Google News برای یک عبارت جستجو، محدود به منابع فارسی/ایران."""
-    q = urllib.parse.quote(query)
-    url = f"https://news.google.com/rss/search?q={q}+when:1d&hl=fa&gl=IR&ceid=IR:fa"
+    params = {
+        "q": f"{query} when:{SEARCH_WINDOW}",
+        "hl": "fa",
+        "gl": "IR",
+        "ceid": "IR:fa",
+    }
+    url = "https://news.google.com/rss/search?" + urllib.parse.urlencode(params)
     req = urllib.request.Request(url, headers=HEADERS)
     with urllib.request.urlopen(req, timeout=20) as resp:
         data = resp.read()
-    return ET.fromstring(data)
+    return data
 
 
 def parse_items(xml_root):
@@ -221,12 +229,24 @@ def main():
 
     for topic in TOPICS:
         try:
-            root = fetch_rss(topic)
+            raw = fetch_rss(topic)
         except Exception as e:
             print(f"[warn] خطا در دریافت RSS برای «{topic}»: {e}")
             continue
 
-        for raw_item in parse_items(root):
+        try:
+            root = ET.fromstring(raw)
+        except ET.ParseError as e:
+            # اگر گوگل به‌جای RSS یک صفحه‌ی HTML (مثلاً کپچا) برگردانده باشد
+            print(f"[warn] پاسخ نامعتبر (غیر XML) برای «{topic}»: {e}")
+            print("[debug] نمونه‌ی پاسخ:", raw[:200])
+            continue
+
+        raw_items = parse_items(root)
+        print(f"[debug] «{topic}»: {len(raw_items)} آیتم خام دریافت شد")
+
+        kept = 0
+        for raw_item in raw_items:
             if not raw_item["link"] or not is_relevant(raw_item):
                 continue
             key = dedupe_key(raw_item)
@@ -234,6 +254,8 @@ def main():
                 continue
             seen.add(key)
             new_items.append(raw_item)
+            kept += 1
+        print(f"[debug] «{topic}»: {kept} خبر جدید و مرتبط بعد از فیلتر")
 
     result_items = []
     for it in new_items:
