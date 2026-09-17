@@ -34,6 +34,6 @@ jobs:
         run: |
           git config user.name "saba-media-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add seen_links.json
+          git add seen_links.json quiz_state.json
           git diff --cached --quiet || git commit -m "update seen links [skip ci]"
           git push
