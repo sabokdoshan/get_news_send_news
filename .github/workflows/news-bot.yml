@@ -34,6 +34,10 @@ jobs:
         run: |
           git config user.name "saba-media-bot"
           git config user.email "actions@users.noreply.github.com"
-          git add seen_links.json quiz_state.json
+          git add seen_links.json
+          # quiz_state.json فقط بعد از اولین ارسال کوییز ساخته می‌شود؛ اگر هنوز
+          # وجود نداشته باشد، git add روی آن خطا می‌دهد و کل مرحله را می‌شکند،
+          # پس فقط وقتی وجود دارد اضافه‌اش می‌کنیم.
+          [ -f quiz_state.json ] && git add quiz_state.json
           git diff --cached --quiet || git commit -m "update seen links [skip ci]"
           git push
