@@ -606,40 +606,6 @@ def send_photo_to_telegram(image_url, caption_html):
 TELEGRAM_CAPTION_LIMIT = 1024
 
 
-def build_caption_html(item):
-    """کپشن مخصوص حالت عکس‌دار: فقط تیتر + خلاصه + لینک. منبع/تاریخ/امضا
-    عمداً اینجا نیستند چون در یک پیام کوتاه جداگانه‌ی بعد از عکس می‌آیند —
-    این‌طوری معمولاً کاملاً زیر ۱۰۲۴ کاراکتر می‌ماند. اگر با این حال زیاد
-    بود، فقط بخشی از خلاصه (نه تیتر، نه لینک) کوتاه می‌شود."""
-    title = html.escape(item["title"])
-    summary = html.escape(item["summary"])
-    short_link = shorten_link(item["link"])
-
-    def build(s):
-        return f"📰 <b>{title}</b>\n\n{s}\n\n🔗 {short_link}"
-
-    caption = build(summary)
-    if len(caption) > TELEGRAM_CAPTION_LIMIT:
-        overflow = len(caption) - TELEGRAM_CAPTION_LIMIT + 1  # +1 برای «…»
-        trimmed = summary[: max(0, len(summary) - overflow)] + "…"
-        caption = build(trimmed)
-    return caption[:TELEGRAM_CAPTION_LIMIT]
-
-
-def build_footer_html(item):
-    """پیام کوتاه بعد از عکس: منبع، تاریخ، و امضای صبا رسانه."""
-    source = html.escape(item["source"])
-    persian_date = format_persian_datetime(item.get("date", ""))
-    return (
-        f"🗞 منبع: {source}\n"
-        f"🕒 تاریخ: {persian_date}\n"
-        f"—————————————\n"
-        f"📡 صبا رسانه\n"
-        f"🆔 {SABA_ID}\n"
-        f"🔗 {SABA_LINK}"
-    )
-
-
 def format_telegram_message(item):
     """پیام کامل و شکیل برای حالت بدون عکس؛ از HTML parse mode تلگرام استفاده می‌کند.
     ترتیب: تیتر (بولد) → خلاصه → منبع و تاریخ → لینک کوتاه → امضای صبا رسانه."""
@@ -663,16 +629,49 @@ def format_telegram_message(item):
     )
 
 
+def build_full_caption_html(item):
+    """کپشن کامل و یکپارچه برای حالت عکس‌دار — دقیقاً همان محتوای پیام
+    بدون‌عکس (تیتر+خلاصه+منبع+تاریخ+لینک+امضا)، همه در یک پست واحد همراه
+    با عکس، بدون هیچ پیام جداگانه‌ی دیگری. اگر طول کل از سقف ۱۰۲۴ کاراکتریِ
+    کپشن تلگرام رد شود (نادر)، فقط خودِ خلاصه کوتاه می‌شود — تیتر، منبع،
+    تاریخ، لینک و امضا هرگز کوتاه یا حذف نمی‌شوند."""
+    title = html.escape(item["title"])
+    summary = html.escape(item["summary"])
+    source = html.escape(item["source"])
+    persian_date = format_persian_datetime(item.get("date", ""))
+    short_link = shorten_link(item["link"])
+
+    def build(s):
+        return (
+            f"📰 <b>{title}</b>\n\n"
+            f"{s}\n\n"
+            f"—————————————\n"
+            f"🗞 منبع: {source}\n"
+            f"🕒 تاریخ: {persian_date}\n"
+            f"🔗 {short_link}\n"
+            f"—————————————\n"
+            f"📡 صبا رسانه\n"
+            f"🆔 {SABA_ID}\n"
+            f"🔗 {SABA_LINK}"
+        )
+
+    caption = build(summary)
+    if len(caption) > TELEGRAM_CAPTION_LIMIT:
+        overflow = len(caption) - TELEGRAM_CAPTION_LIMIT + 1  # +1 برای «…»
+        trimmed = summary[: max(0, len(summary) - overflow)] + "…"
+        caption = build(trimmed)
+    return caption[:TELEGRAM_CAPTION_LIMIT]
+
+
 def send_news_item(item):
-    """مسیر ارسال یک خبر: اگر عکس دارد، عکس+کپشن و بعد یک پیام کوتاه امضا
-    ارسال می‌شود؛ اگر عکس ندارد یا ارسال عکس با هر دلیلی شکست بخورد
-    (لینک خراب، تایم‌اوت، فرمت نامعتبر و ...)، بدون از دست‌رفتن خبر،
-    به ارسال متنیِ کاملِ معمولی برمی‌گردیم."""
+    """مسیر ارسال یک خبر: اگر عکس دارد، همه‌چیز (تیتر+خلاصه+منبع+تاریخ+
+    لینک+امضا) در یک پست واحد همراه با عکس ارسال می‌شود. اگر عکس ندارد یا
+    ارسال عکس با هر دلیلی شکست بخورد (لینک خراب، تایم‌اوت، فرمت نامعتبر و
+    ...)، بدون از دست‌رفتن خبر، به ارسال متنیِ کاملِ معمولی برمی‌گردیم."""
     image_url = item.get("image")
     if image_url:
-        caption = build_caption_html(item)
+        caption = build_full_caption_html(item)
         if send_photo_to_telegram(image_url, caption):
-            send_to_telegram(build_footer_html(item))
             return
         print("[warn] ارسال عکس شکست خورد؛ به‌جای آن پیام متنی کامل ارسال می‌شود.")
     send_to_telegram(format_telegram_message(item))
