@@ -87,6 +87,14 @@ SABA_CHANNEL_LINE = f"کانال صبا رسانه: {SABA_ID} ({SABA_LINK})"
 # فایل ذخیره‌ی لینک‌های قبلاً ارسال‌شده (برای جلوگیری از تکرار خبر)
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_links.json")
 
+# فایل ذخیره‌ی وضعیت کوییز روزانه (آخرین تاریخ ارسال + شماره‌ی سوال بعدی)
+QUIZ_STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quiz_state.json")
+
+# ساعت ارسال کوییز روزانه، به‌وقت تهران (۹:۳۰ صبح — زمانی که معمولاً
+# بازنشستگان و کارگران صبح‌ها گوشی را چک می‌کنند و با ربات‌های ارز/متن
+# صبحگاهی‌تان تداخل ندارد)
+QUIZ_HOUR_TEHRAN = 9
+
 # کلید رایگان Groq برای خلاصه‌سازی با LLM (اختیاری). اگر خالی باشد،
 # اسکریپت به خلاصه‌ی استخراجی سبک بسنده می‌کند.
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
@@ -136,6 +144,151 @@ def save_seen(seen):
     trimmed = list(seen)[-5000:]
     with open(STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(trimmed, f, ensure_ascii=False)
+
+
+# ---------------------------------------------------------------------------
+# کوییز روزانه — بانک سوالات (هر سوال بر اساس منبع رسمی/معتبر تایید شده،
+# نه حدس؛ منبع هرکدام در کامنت جلوی آن آمده تا در صورت تغییر قانون در
+# سال‌های بعد، به‌روزرسانی‌اش ساده باشد)
+# ---------------------------------------------------------------------------
+QUIZ_BANK = [
+    {
+        "category": "قوانین جاری کار",
+        "question": "حداقل دستمزد روزانه‌ی کارگران در سال ۱۴۰۵ چند ریال است؟",
+        "options": ["۵,۵۴۱,۸۵۰ ریال", "۳,۲۰۰,۰۰۰ ریال", "۷,۰۰۰,۰۰۰ ریال", "۴,۵۰۰,۰۰۰ ریال"],
+        "correct_index": 0,
+        "explanation": "طبق مصوبه شورای عالی کار (جلسه ۳۴۱، اسفند ۱۴۰۴)، حداقل مزد روزانه ۱۴۰۵ برابر ۵,۵۴۱,۸۵۰ ریال تعیین شد.",
+    },
+    {
+        "category": "قوانین جاری کار",
+        "question": "طبق قانون کار ایران، حداکثر ساعت کار عادی در هفته چند ساعت است؟",
+        "options": ["۴۰ ساعت", "۴۴ ساعت", "۴۸ ساعت", "۳۶ ساعت"],
+        "correct_index": 1,
+        "explanation": "بر اساس ماده ۵۱ قانون کار، ساعت کار عادی کارگران حداکثر ۴۴ ساعت در هفته است.",
+    },
+    {
+        "category": "قوانین جاری کار",
+        "question": "مرخصی استحقاقی سالانه‌ی کارگران طبق قانون کار چند روز کاری است؟",
+        "options": ["۱۲ روز", "۱۸ روز", "۲۶ روز", "۳۰ روز"],
+        "correct_index": 2,
+        "explanation": "طبق ماده ۶۴ قانون کار، مرخصی استحقاقی سالانه معادل یک ماه (۲۶ روز کاری) است.",
+    },
+    {
+        "category": "چالش‌های بازنشستگان",
+        "question": "سن بازنشستگی مردان بیمه‌شده‌ی تأمین اجتماعی طبق قانون جدید بازنشستگی از چند سال به چند سال افزایش یافته؟",
+        "options": ["از ۵۵ به ۶۰", "از ۶۰ به ۶۲", "از ۶۲ به ۶۵", "تغییری نکرده"],
+        "correct_index": 1,
+        "explanation": "طبق قانون جدید بازنشستگی، سن بازنشستگی مردان از ۶۰ به ۶۲ سال افزایش یافته است.",
+    },
+    {
+        "category": "چالش‌های بازنشستگان",
+        "question": "«متناسب‌سازی حقوق بازنشستگان» که این روزها زیاد در اخبار می‌آید، در سال ۱۴۰۵ در چه مرحله‌ای قرار دارد؟",
+        "options": ["مرحله اول", "مرحله دوم", "مرحله سوم", "هنوز شروع نشده"],
+        "correct_index": 2,
+        "explanation": "مرحله اول متناسب‌سازی در ۱۴۰۳، مرحله دوم در ۱۴۰۴ و مرحله سوم در سال ۱۴۰۵ در حال اجراست.",
+    },
+    {
+        "category": "چالش‌های بازنشستگان",
+        "question": "بر اساس آخرین آمار، پرداخت معوقات فروردین‌ماه بازنشستگان تأمین اجتماعی شامل حال چند نفر می‌شد؟",
+        "options": ["حدود ۵۰۰ هزار نفر", "حدود ۵.۳ میلیون نفر", "حدود ۱ میلیون نفر", "حدود ۱۰ میلیون نفر"],
+        "correct_index": 1,
+        "explanation": "طبق اطلاعیه‌ی سازمان تأمین اجتماعی، این معوقات شامل حال ۵ میلیون و ۳۰۰ هزار بازنشسته و مستمری‌بگیر بود.",
+    },
+    {
+        "category": "سلامت و بهداشت",
+        "question": "طرحی که این روزها تأمین اجتماعی برای هدایت بیمه‌شدگان به سمت یک پزشک مشخص پیش از مراجعه به متخصص اجرا می‌کند، چه نام دارد؟",
+        "options": ["نظام ارجاع و پزشک خانواده", "طرح تحول سلامت", "بیمه تکمیلی رایگان", "کارت هوشمند درمان"],
+        "correct_index": 0,
+        "explanation": "معاونت درمان تأمین اجتماعی در حال اجرای برنامه‌ی «پزشکی خانواده و نظام ارجاع» برای بیمه‌شدگان است.",
+    },
+    {
+        "category": "سلامت و بهداشت",
+        "question": "کدام مورد جزو خدمات درمانی رایج تحت پوشش تأمین اجتماعی برای بازنشستگان است؟",
+        "options": ["بیمه بدنه خودرو", "فیش دارویی و بیمه تکمیلی درمان", "بیمه مسافرتی خارج از کشور", "بیمه عمر و سرمایه‌گذاری"],
+        "correct_index": 1,
+        "explanation": "فیش دارویی و بیمه تکمیلی درمان از خدمات اصلی حوزه‌ی سلامت تأمین اجتماعی برای بازنشستگان است.",
+    },
+    {
+        "category": "قوانین جاری کار",
+        "question": "بر اساس بخشنامه‌ی ۱۴۰۵، حق اولاد ماهانه برای هر فرزند کارگران چقدر تعیین شد؟",
+        "options": ["حدود ۵۰۰ هزار تومان", "حدود ۱.۶ میلیون تومان", "حدود ۳ میلیون تومان", "پرداخت نمی‌شود"],
+        "correct_index": 1,
+        "explanation": "طبق بخشنامه‌ی ۱۴۰۵، حق اولاد هر فرزند ماهانه ۱۶,۶۲۵,۵۵۰ ریال (حدود ۱.۶ میلیون تومان) تعیین شد.",
+    },
+]
+
+
+def load_quiz_state():
+    default = {"last_quiz_date": "", "quiz_index": 0}
+    if os.path.exists(QUIZ_STATE_FILE):
+        try:
+            with open(QUIZ_STATE_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            default.update(data)
+        except Exception:
+            pass
+    return default
+
+
+def save_quiz_state(state):
+    with open(QUIZ_STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False)
+
+
+def send_quiz_to_telegram(quiz_item):
+    """ارسال یک سوال کوییز با استفاده از متد رسمی sendPoll در Bot API تلگرام
+    (type='quiz')؛ خودِ تلگرام رأی‌گیری، درصدها و نمایش جواب درست را انجام
+    می‌دهد، هیچ زیرساخت اضافه‌ای لازم نیست."""
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return False
+    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPoll"
+    prefixed_question = f"🧠 کوییز روزانه صبا رسانه | {quiz_item['category']}\n\n{quiz_item['question']}"
+    data = urllib.parse.urlencode({
+        "chat_id": TELEGRAM_CHAT_ID,
+        "question": prefixed_question[:300],
+        "options": json.dumps(quiz_item["options"], ensure_ascii=False),
+        "type": "quiz",
+        "correct_option_id": quiz_item["correct_index"],
+        "is_anonymous": "true",
+        "explanation": quiz_item["explanation"][:200],
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=data, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        if result.get("ok"):
+            return True
+        print(f"[warn] ارسال کوییز به تلگرام رد شد: {result}")
+        return False
+    except Exception as e:
+        print(f"[warn] ارسال کوییز به تلگرام با خطا مواجه شد: {e}")
+        return False
+
+
+def maybe_send_daily_quiz():
+    """اگر ساعت فعلی به‌وقت تهران برابر QUIZ_HOUR_TEHRAN باشد و امروز هنوز
+    کوییزی ارسال نشده باشد، یک سوال (به‌ترتیب چرخشی از QUIZ_BANK) می‌فرستد."""
+    try:
+        from zoneinfo import ZoneInfo
+        tehran_now = datetime.now(ZoneInfo("Asia/Tehran"))
+    except Exception:
+        tehran_now = datetime.now(timezone.utc) + timedelta(hours=3, minutes=30)
+
+    if tehran_now.hour != QUIZ_HOUR_TEHRAN:
+        return
+
+    state = load_quiz_state()
+    today_str = tehran_now.strftime("%Y-%m-%d")
+    if state.get("last_quiz_date") == today_str:
+        return  # امروز قبلاً کوییز ارسال شده
+
+    idx = state.get("quiz_index", 0) % len(QUIZ_BANK)
+    quiz_item = QUIZ_BANK[idx]
+    print(f"[debug] ارسال کوییز روزانه، موضوع: {quiz_item['category']}")
+    if send_quiz_to_telegram(quiz_item):
+        state["last_quiz_date"] = today_str
+        state["quiz_index"] = idx + 1
+        save_quiz_state(state)
 
 
 def is_too_old(pub_date_str):
@@ -606,14 +759,16 @@ def main():
     if not result_items:
         output = "خبر جدیدی یافت نشد."
         print(output)
-        return
+    else:
+        output_json = json.dumps({"items": result_items}, ensure_ascii=False, indent=2)
+        print(output_json)
 
-    output_json = json.dumps({"items": result_items}, ensure_ascii=False, indent=2)
-    print(output_json)
+        # ارسال هر خبر: با عکس (در صورت وجود) یا به‌صورت متنی
+        for it in result_items:
+            send_news_item(it)
 
-    # ارسال هر خبر: با عکس (در صورت وجود) یا به‌صورت متنی
-    for it in result_items:
-        send_news_item(it)
+    # کوییز روزانه مستقل از وجود یا نبود خبر تازه بررسی و (در ساعت مقرر) ارسال می‌شود
+    maybe_send_daily_quiz()
 
 
 if __name__ == "__main__":
