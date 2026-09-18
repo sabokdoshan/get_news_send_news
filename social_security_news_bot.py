@@ -23,6 +23,7 @@
 
 import os
 import re
+import csv
 import json
 import html
 import hashlib
@@ -83,6 +84,12 @@ DIRECT_RSS_FEEDS = [
 SABA_ID = "@saba_rasanehh"
 SABA_LINK = "https://t.me/saba_rasanehh"
 SABA_CHANNEL_LINE = f"کانال صبا رسانه: {SABA_ID} ({SABA_LINK})"
+
+# مقصد نظرسنجی روزانه: مستقیماً خودِ کانال (نه چت خصوصی/گروه بررسی که اخبار
+# آنجا می‌روند). با نام کاربری کانال هم می‌شود پیام فرستاد، بدون نیاز به
+# شناسه‌ی عددی — فقط کافی است ربات ادمین کانال باشد. در صورت نیاز، با
+# متغیر محیطی QUIZ_CHAT_ID قابل بازنویسی است (مثلاً برای تست روی مقصد دیگر).
+QUIZ_CHAT_ID = os.environ.get("QUIZ_CHAT_ID", SABA_ID)
 
 # فایل ذخیره‌ی لینک‌های قبلاً ارسال‌شده (برای جلوگیری از تکرار خبر)
 STATE_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "seen_links.json")
@@ -147,75 +154,49 @@ def save_seen(seen):
 
 
 # ---------------------------------------------------------------------------
-# کوییز روزانه — بانک سوالات (هر سوال بر اساس منبع رسمی/معتبر تایید شده،
-# نه حدس؛ منبع هرکدام در کامنت جلوی آن آمده تا در صورت تغییر قانون در
-# سال‌های بعد، به‌روزرسانی‌اش ساده باشد)
+# نظرسنجی روزانه — بانک سوالات از فایل خارجی quiz_bank.csv خوانده می‌شود
+# (قابل ویرایش مستقیم با اکسل/گوگل‌شیت؛ توضیح ستون‌ها در همان فایل آمده)
 # ---------------------------------------------------------------------------
-QUIZ_BANK = [
-    {
-        "category": "قوانین جاری کار",
-        "question": "حداقل دستمزد روزانه‌ی کارگران در سال ۱۴۰۵ چند ریال است؟",
-        "options": ["۵,۵۴۱,۸۵۰ ریال", "۳,۲۰۰,۰۰۰ ریال", "۷,۰۰۰,۰۰۰ ریال", "۴,۵۰۰,۰۰۰ ریال"],
-        "correct_index": 0,
-        "explanation": "طبق مصوبه شورای عالی کار (جلسه ۳۴۱، اسفند ۱۴۰۴)، حداقل مزد روزانه ۱۴۰۵ برابر ۵,۵۴۱,۸۵۰ ریال تعیین شد.",
-    },
-    {
-        "category": "قوانین جاری کار",
-        "question": "طبق قانون کار ایران، حداکثر ساعت کار عادی در هفته چند ساعت است؟",
-        "options": ["۴۰ ساعت", "۴۴ ساعت", "۴۸ ساعت", "۳۶ ساعت"],
-        "correct_index": 1,
-        "explanation": "بر اساس ماده ۵۱ قانون کار، ساعت کار عادی کارگران حداکثر ۴۴ ساعت در هفته است.",
-    },
-    {
-        "category": "قوانین جاری کار",
-        "question": "مرخصی استحقاقی سالانه‌ی کارگران طبق قانون کار چند روز کاری است؟",
-        "options": ["۱۲ روز", "۱۸ روز", "۲۶ روز", "۳۰ روز"],
-        "correct_index": 2,
-        "explanation": "طبق ماده ۶۴ قانون کار، مرخصی استحقاقی سالانه معادل یک ماه (۲۶ روز کاری) است.",
-    },
-    {
-        "category": "چالش‌های بازنشستگان",
-        "question": "سن بازنشستگی مردان بیمه‌شده‌ی تأمین اجتماعی طبق قانون جدید بازنشستگی از چند سال به چند سال افزایش یافته؟",
-        "options": ["از ۵۵ به ۶۰", "از ۶۰ به ۶۲", "از ۶۲ به ۶۵", "تغییری نکرده"],
-        "correct_index": 1,
-        "explanation": "طبق قانون جدید بازنشستگی، سن بازنشستگی مردان از ۶۰ به ۶۲ سال افزایش یافته است.",
-    },
-    {
-        "category": "چالش‌های بازنشستگان",
-        "question": "«متناسب‌سازی حقوق بازنشستگان» که این روزها زیاد در اخبار می‌آید، در سال ۱۴۰۵ در چه مرحله‌ای قرار دارد؟",
-        "options": ["مرحله اول", "مرحله دوم", "مرحله سوم", "هنوز شروع نشده"],
-        "correct_index": 2,
-        "explanation": "مرحله اول متناسب‌سازی در ۱۴۰۳، مرحله دوم در ۱۴۰۴ و مرحله سوم در سال ۱۴۰۵ در حال اجراست.",
-    },
-    {
-        "category": "چالش‌های بازنشستگان",
-        "question": "بر اساس آخرین آمار، پرداخت معوقات فروردین‌ماه بازنشستگان تأمین اجتماعی شامل حال چند نفر می‌شد؟",
-        "options": ["حدود ۵۰۰ هزار نفر", "حدود ۵.۳ میلیون نفر", "حدود ۱ میلیون نفر", "حدود ۱۰ میلیون نفر"],
-        "correct_index": 1,
-        "explanation": "طبق اطلاعیه‌ی سازمان تأمین اجتماعی، این معوقات شامل حال ۵ میلیون و ۳۰۰ هزار بازنشسته و مستمری‌بگیر بود.",
-    },
-    {
-        "category": "سلامت و بهداشت",
-        "question": "طرحی که این روزها تأمین اجتماعی برای هدایت بیمه‌شدگان به سمت یک پزشک مشخص پیش از مراجعه به متخصص اجرا می‌کند، چه نام دارد؟",
-        "options": ["نظام ارجاع و پزشک خانواده", "طرح تحول سلامت", "بیمه تکمیلی رایگان", "کارت هوشمند درمان"],
-        "correct_index": 0,
-        "explanation": "معاونت درمان تأمین اجتماعی در حال اجرای برنامه‌ی «پزشکی خانواده و نظام ارجاع» برای بیمه‌شدگان است.",
-    },
-    {
-        "category": "سلامت و بهداشت",
-        "question": "کدام مورد جزو خدمات درمانی رایج تحت پوشش تأمین اجتماعی برای بازنشستگان است؟",
-        "options": ["بیمه بدنه خودرو", "فیش دارویی و بیمه تکمیلی درمان", "بیمه مسافرتی خارج از کشور", "بیمه عمر و سرمایه‌گذاری"],
-        "correct_index": 1,
-        "explanation": "فیش دارویی و بیمه تکمیلی درمان از خدمات اصلی حوزه‌ی سلامت تأمین اجتماعی برای بازنشستگان است.",
-    },
-    {
-        "category": "قوانین جاری کار",
-        "question": "بر اساس بخشنامه‌ی ۱۴۰۵، حق اولاد ماهانه برای هر فرزند کارگران چقدر تعیین شد؟",
-        "options": ["حدود ۵۰۰ هزار تومان", "حدود ۱.۶ میلیون تومان", "حدود ۳ میلیون تومان", "پرداخت نمی‌شود"],
-        "correct_index": 1,
-        "explanation": "طبق بخشنامه‌ی ۱۴۰۵، حق اولاد هر فرزند ماهانه ۱۶,۶۲۵,۵۵۰ ریال (حدود ۱.۶ میلیون تومان) تعیین شد.",
-    },
-]
+QUIZ_BANK_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "quiz_bank.csv")
+
+
+def load_quiz_bank():
+    """خواندن بانک سوالات از quiz_bank.csv. اگر یک سطر ناقص/خراب باشد،
+    فقط همان سطر با هشدار در لاگ رد می‌شود (نه کل نظرسنجی از کار بیفتد)."""
+    bank = []
+    if not os.path.exists(QUIZ_BANK_FILE):
+        print(f"[warn] فایل {QUIZ_BANK_FILE} پیدا نشد؛ نظرسنجی روزانه غیرفعال می‌ماند.")
+        return bank
+
+    with open(QUIZ_BANK_FILE, "r", encoding="utf-8-sig", newline="") as f:
+        reader = csv.DictReader(f)
+        for row_num, row in enumerate(reader, start=2):  # سطر ۱ هدر است
+            try:
+                options = [
+                    (row.get("option1") or "").strip(),
+                    (row.get("option2") or "").strip(),
+                    (row.get("option3") or "").strip(),
+                    (row.get("option4") or "").strip(),
+                ]
+                if any(not o for o in options):
+                    raise ValueError("یکی از چهار گزینه خالی است")
+                correct = int((row.get("correct_option") or "").strip())
+                if not (1 <= correct <= 4):
+                    raise ValueError("correct_option باید عددی بین ۱ تا ۴ باشد")
+                question = (row.get("question") or "").strip()
+                if not question:
+                    raise ValueError("ستون question خالی است")
+                bank.append({
+                    "category": (row.get("category") or "عمومی").strip(),
+                    "question": question,
+                    "options": options,
+                    "correct_index": correct - 1,
+                    "explanation": (row.get("explanation") or "").strip(),
+                })
+            except Exception as e:
+                print(f"[warn] سطر {row_num} در quiz_bank.csv نامعتبر است و رد شد: {e}")
+
+    return bank
 
 
 def load_quiz_state():
@@ -236,15 +217,17 @@ def save_quiz_state(state):
 
 
 def send_quiz_to_telegram(quiz_item):
-    """ارسال یک سوال کوییز با استفاده از متد رسمی sendPoll در Bot API تلگرام
+    """ارسال یک نظرسنجی با استفاده از متد رسمی sendPoll در Bot API تلگرام
     (type='quiz')؛ خودِ تلگرام رأی‌گیری، درصدها و نمایش جواب درست را انجام
-    می‌دهد، هیچ زیرساخت اضافه‌ای لازم نیست."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    می‌دهد، هیچ زیرساخت اضافه‌ای لازم نیست.
+    مقصدش مستقیماً خودِ کانال صبا رسانه است (نه چت خصوصی/گروه بررسی)؛ برای
+    این کار ربات باید ادمین کانال @saba_rasanehh باشد."""
+    if not TELEGRAM_BOT_TOKEN:
         return False
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPoll"
-    prefixed_question = f"🧠 کوییز روزانه صبا رسانه | {quiz_item['category']}\n\n{quiz_item['question']}"
+    prefixed_question = f"🧠 نظرسنجی روزانه صبا رسانه | {quiz_item['category']}\n\n{quiz_item['question']}"
     data = urllib.parse.urlencode({
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": QUIZ_CHAT_ID,
         "question": prefixed_question[:300],
         "options": json.dumps(quiz_item["options"], ensure_ascii=False),
         "type": "quiz",
@@ -258,16 +241,16 @@ def send_quiz_to_telegram(quiz_item):
             result = json.loads(resp.read().decode("utf-8"))
         if result.get("ok"):
             return True
-        print(f"[warn] ارسال کوییز به تلگرام رد شد: {result}")
+        print(f"[warn] ارسال نظرسنجی به تلگرام رد شد: {result}")
         return False
     except Exception as e:
-        print(f"[warn] ارسال کوییز به تلگرام با خطا مواجه شد: {e}")
+        print(f"[warn] ارسال نظرسنجی به تلگرام با خطا مواجه شد: {e}")
         return False
 
 
 def maybe_send_daily_quiz():
     """اگر ساعت فعلی به‌وقت تهران برابر QUIZ_HOUR_TEHRAN باشد و امروز هنوز
-    کوییزی ارسال نشده باشد، یک سوال (به‌ترتیب چرخشی از QUIZ_BANK) می‌فرستد."""
+    نظرسنجی‌ای ارسال نشده باشد، یک سوال (به‌ترتیب چرخشی از quiz_bank.csv) می‌فرستد."""
     try:
         from zoneinfo import ZoneInfo
         tehran_now = datetime.now(ZoneInfo("Asia/Tehran"))
@@ -277,14 +260,18 @@ def maybe_send_daily_quiz():
     if tehran_now.hour != QUIZ_HOUR_TEHRAN:
         return
 
+    quiz_bank = load_quiz_bank()
+    if not quiz_bank:
+        return  # فایل quiz_bank.csv خالی یا پیدا نشد؛ هشدارش قبلاً چاپ شده
+
     state = load_quiz_state()
     today_str = tehran_now.strftime("%Y-%m-%d")
     if state.get("last_quiz_date") == today_str:
-        return  # امروز قبلاً کوییز ارسال شده
+        return  # امروز قبلاً نظرسنجی ارسال شده
 
-    idx = state.get("quiz_index", 0) % len(QUIZ_BANK)
-    quiz_item = QUIZ_BANK[idx]
-    print(f"[debug] ارسال کوییز روزانه، موضوع: {quiz_item['category']}")
+    idx = state.get("quiz_index", 0) % len(quiz_bank)
+    quiz_item = quiz_bank[idx]
+    print(f"[debug] ارسال نظرسنجی روزانه، موضوع: {quiz_item['category']}")
     if send_quiz_to_telegram(quiz_item):
         state["last_quiz_date"] = today_str
         state["quiz_index"] = idx + 1
