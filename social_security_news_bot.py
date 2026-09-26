@@ -133,6 +133,9 @@ HARD_EXCLUDE_KEYWORDS = [
     "افتتاح", "کلنگ‌زنی", "بازدید میدانی", "جشنواره",
     "نذر خون", "گرامیداشت", "هفته دفاع مقدس",
     "مسابقه ورزشی", "قهرمانی", "تیم فوتبال", "المپیاد",
+    # اظهارنظرهای مقامات محلی/استانی معمولاً محلی هستند، حتی اگر کلمه‌ی
+    # «معیشت» یا «کارگر» هم در آن باشد (مثل «استاندار X پیگیر مشکلات Y شد»)
+    "استاندار", "فرماندار", "بخشدار", "شهردار",
 ]
 
 # مدلی که برای داوری معنایی «آیا این خبر واقعاً روی معیشت/درمان میلیون‌ها
@@ -557,6 +560,15 @@ def _ai_relevance_verdicts(candidates):
         raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
         verdicts = json.loads(raw_text)
         return {i: bool(v) for i, v in enumerate(verdicts)}
+    except urllib.error.HTTPError as e:
+        # بدنه‌ی پاسخ خطا را هم می‌خوانیم؛ Groq معمولاً دلیل دقیق (کلید نامعتبر،
+        # محدودیت حساب، مدل غیرمجاز و ...) را در همین بدنه برمی‌گرداند، نه فقط کد وضعیت
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = "(بدنه‌ی پاسخ خوانده نشد)"
+        print(f"[warn] داوری هوشمند اهمیت خبر شکست خورد: HTTP {e.code} — {body[:500]}")
+        return {}
     except Exception as e:
         print(f"[warn] داوری هوشمند اهمیت خبر شکست خورد: {e}")
         return {}
@@ -576,14 +588,21 @@ def filter_nationally_significant(items):
     ]
 
     if not GROQ_API_KEY:
-        # بدون کلید Groq (که برای خلاصه‌سازی هم لازم است)، فقط همین رد سریع
-        # کلیدواژه‌ای اعمال می‌شود و بقیه‌ی موارد مشکوک بدون فیلتر معنایی رد می‌شوند
+        # بدون کلید Groq (که برای خلاصه‌سازی هم لازم است)، اصلاً این لایه
+        # فعال نیست؛ فقط همان رد سریع کلیدواژه‌ای بالا اعمال شده و بقیه‌ی
+        # موارد (بدون بررسی معنایی) عبور می‌کنند
         return survivors
 
     verdicts = _ai_relevance_verdicts(survivors)
     if not verdicts:
-        # اگر خودِ تماس API شکست خورد، حداقل رد سریع کلیدواژه‌ای اعمال‌شده باقی می‌ماند
-        return survivors
+        # کلید تنظیم شده ولی خودِ تماس API شکست خورده (مثلاً قطعی سرویس Groq).
+        # عمداً محافظه‌کارانه عمل می‌کنیم: به‌جای ارسالِ همه‌ی موارد مشکوک
+        # (که می‌تواند دقیقاً همان اخبار محلی/بی‌ربطی باشد که این لایه قرار
+        # است حذف کند)، در این حالت هیچ‌کدام را رد نمی‌شود، بلکه رد می‌شوند —
+        # چون هدف کاربر «کیفیت» است نه «کامل بودن»، در این حالت به‌جای پذیرفتن،
+        # همه‌ی موارد مشکوکِ این دوره رد می‌شوند.
+        print("[warn] چون داوری هوشمند در دسترس نبود، موارد مشکوک این دوره به‌صورت محافظه‌کارانه رد شدند")
+        return []
 
     return [it for i, it in enumerate(survivors) if verdicts.get(i, False)]
 
@@ -637,8 +656,16 @@ def llm_summary(item):
         with urllib.request.urlopen(req, timeout=30) as resp:
             result = json.loads(resp.read().decode("utf-8"))
         return result["choices"][0]["message"]["content"].strip()
-    except Exception:
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")
+        except Exception:
+            body = "(بدنه‌ی پاسخ خوانده نشد)"
+        print(f"[warn] خلاصه‌سازی با Groq شکست خورد: HTTP {e.code} — {body[:500]}")
+        return fallback_summary(item)
+    except Exception as e:
         # اگر سرویس رایگان در دسترس نبود (مثلاً به‌خاطر فیلترینگ)، به روش ساده برمی‌گردیم
+        print(f"[warn] خلاصه‌سازی با Groq شکست خورد: {e}")
         return fallback_summary(item)
 
 
