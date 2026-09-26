@@ -125,6 +125,22 @@ RELEVANT_PATTERNS = [
 # عبارات تبلیغاتی/نامرتبط که باید حذف شوند
 BLOCK_KEYWORDS = ["تخفیف ویژه", "آگهی", "تبلیغ", "فروش ویژه"]
 
+# --- لایه‌ی دوم فیلتر (معنایی): رد سریع اخبار تشریفاتی/محلی که با کلیدواژه‌های
+# بالا («کارگر»، «معیشت» و ...) اشتباهاً «مرتبط» تشخیص داده می‌شوند، مثل
+# «پویش نذر خون کارگران شهرستان X» یا مراسم/جشنواره‌های محلی. این رد، رایگان
+# و بدون تماس با هیچ API انجام می‌شود.
+HARD_EXCLUDE_KEYWORDS = [
+    "افتتاح", "کلنگ‌زنی", "بازدید میدانی", "جشنواره",
+    "نذر خون", "گرامیداشت", "هفته دفاع مقدس",
+    "مسابقه ورزشی", "قهرمانی", "تیم فوتبال", "المپیاد",
+]
+
+# مدلی که برای داوری معنایی «آیا این خبر واقعاً روی معیشت/درمان میلیون‌ها
+# کارگر و بازنشسته اثر ملی دارد یا محلی/بی‌اثر است» استفاده می‌شود — همان
+# مدل رایگان Groq که برای خلاصه‌سازی هم استفاده شده، تا نیازی به کلید یا
+# سرویس اضافه نباشد.
+RELEVANCE_JUDGE_MODEL = GROQ_MODEL
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                   "(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
@@ -485,6 +501,93 @@ def is_relevant(item):
     return any(p.search(text) for p in RELEVANT_PATTERNS)
 
 
+# ---------------------------------------------------------------------------
+# لایه‌ی دوم فیلتر (معنایی): تشخیص اهمیت واقعی و ملیِ خبر
+# ---------------------------------------------------------------------------
+# is_relevant() بالا فقط حضور کلیدواژه را چک می‌کند و نمی‌تواند خبر محلیِ
+# به‌ظاهر مرتبط (مثل «مدیریت آب کشاورزان استان X» که کلمه‌ی «معیشت» دارد)
+# یا خبر تشریفاتیِ به‌ظاهر مرتبط (مثل «نذر خون کارگران شهرستان X») را از
+# خبر واقعاً مهم برای معیشت/درمانِ ملیِ کارگران و بازنشستگان تشخیص دهد.
+# این تابع همان تشخیص را با مدل رایگان Groq انجام می‌دهد.
+
+def _ai_relevance_verdicts(candidates):
+    """داوری دسته‌ای (یک تماس API برای همه‌ی کاندیدها، برای کمینه‌کردن مصرف
+    کوتای رایگان). خروجی: دیکشنری {index: True/False}."""
+    if not GROQ_API_KEY or not candidates:
+        return {}
+
+    numbered = "\n".join(
+        f"{i}) عنوان: {c['title']}\n   چکیده: {c['summary_raw'][:200]}"
+        for i, c in enumerate(candidates)
+    )
+    prompt = (
+        "تو ویراستار یک رسانه‌ی تخصصیِ کارگری و بازنشستگی هستی.\n"
+        "برای هر خبر زیر، فقط در صورتی true بزن که اثر مستقیم و محسوس روی "
+        "معیشت (حقوق، دستمزد، قدرت خرید، مستمری) یا درمان (بیمه، دارو، هزینه "
+        "درمان) میلیون‌ها کارگر و بازنشسته‌ی سراسر کشور دارد.\n"
+        "false بزن برای:\n"
+        "- اخبار محلیِ یک شهر/استان بدون اثر ملی (حتی اگر کلمه‌ی معیشت یا "
+        "کارگر در آن باشد، مثل مدیریت آب کشاورزی یک استان)\n"
+        "- اخبار تشریفاتی، مراسم، ورزشی یا نمادین (حتی با حضور کارگران)\n"
+        "- تحلیل‌های کلی بدون خبر مشخص، آگهی یا شایعه‌ی بدون منبع رسمی\n\n"
+        f"{numbered}\n\n"
+        "فقط یک آرایه‌ی JSON از true/false، دقیقاً به همان ترتیب شماره‌ها، بدون "
+        "هیچ توضیح اضافه برگردان. مثال دقیق فرمت خروجی: [true, false, true]"
+    )
+    body = json.dumps({
+        "model": RELEVANCE_JUDGE_MODEL,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0,
+        "max_tokens": 300,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/chat/completions",
+        data=body,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+        },
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            result = json.loads(resp.read().decode("utf-8"))
+        raw_text = result["choices"][0]["message"]["content"].strip()
+        # مدل گاهی خروجی را داخل ```json ... ``` می‌گذارد؛ در صورت وجود حذفش می‌کنیم
+        raw_text = re.sub(r"^```(json)?|```$", "", raw_text, flags=re.MULTILINE).strip()
+        verdicts = json.loads(raw_text)
+        return {i: bool(v) for i, v in enumerate(verdicts)}
+    except Exception as e:
+        print(f"[warn] داوری هوشمند اهمیت خبر شکست خورد: {e}")
+        return {}
+
+
+def filter_nationally_significant(items):
+    """از میان خبرهایی که از is_relevant() عبور کرده‌اند، فقط مواردی را نگه
+    می‌دارد که واقعاً اثر ملی روی معیشت/درمان میلیون‌ها کارگر و بازنشسته
+    دارند — نه محلی، تشریفاتی یا مختص گروه/شهر خاص."""
+    if not items:
+        return items
+
+    # گام رایگان و آفلاین: رد فوری موارد بدیهیِ تشریفاتی، بدون تماس با API
+    survivors = [
+        it for it in items
+        if not any(k in f"{it['title']} {it['summary_raw']}" for k in HARD_EXCLUDE_KEYWORDS)
+    ]
+
+    if not GROQ_API_KEY:
+        # بدون کلید Groq (که برای خلاصه‌سازی هم لازم است)، فقط همین رد سریع
+        # کلیدواژه‌ای اعمال می‌شود و بقیه‌ی موارد مشکوک بدون فیلتر معنایی رد می‌شوند
+        return survivors
+
+    verdicts = _ai_relevance_verdicts(survivors)
+    if not verdicts:
+        # اگر خودِ تماس API شکست خورد، حداقل رد سریع کلیدواژه‌ای اعمال‌شده باقی می‌ماند
+        return survivors
+
+    return [it for i, it in enumerate(survivors) if verdicts.get(i, False)]
+
+
 def dedupe_key(item):
     # هش لینک برای جلوگیری از ارسال خبر تکراری
     return hashlib.sha256(item["link"].encode("utf-8")).hexdigest()
@@ -727,6 +830,10 @@ def main():
             print(f"[warn] خطا در دریافت Google News برای «{topic}»: {e}")
             continue
         _process_feed(f"Google: {topic}", raw, seen, new_items)
+
+    before_count = len(new_items)
+    new_items = filter_nationally_significant(new_items)
+    print(f"[debug] فیلتر اهمیت ملی: از {before_count} خبر، {len(new_items)} خبر واقعاً مرتبط با معیشت/درمان میلیون‌ها کارگر و بازنشسته باقی ماند")
 
     result_items = []
     for it in new_items:
