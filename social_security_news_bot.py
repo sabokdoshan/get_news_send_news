@@ -105,7 +105,7 @@ QUIZ_HOUR_TEHRAN = 9
 # کلید رایگان Groq برای خلاصه‌سازی با LLM (اختیاری). اگر خالی باشد،
 # اسکریپت به خلاصه‌ی استخراجی سبک بسنده می‌کند.
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
-GROQ_MODEL = "llama-3.1-8b-instant"  # مدل رایگان و سریع Groq
+GROQ_MODEL = "openai/gpt-oss-20b"  # مدل رایگان و سریع Groq (llama-3.1-8b-instant در 2026/08/16 بازنشسته شد)
 
 # تلگرام (اختیاری) — برای ارسال خودکار خروجی به یک گروه/کانال
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
