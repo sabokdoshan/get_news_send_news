@@ -549,6 +549,7 @@ def _ai_relevance_verdicts(candidates):
         headers={
             "Content-Type": "application/json",
             "Authorization": f"Bearer {GROQ_API_KEY}",
+            "User-Agent": HEADERS["User-Agent"],
         },
         method="POST",
     )
@@ -650,6 +651,7 @@ def llm_summary(item):
             headers={
                 "Content-Type": "application/json",
                 "Authorization": f"Bearer {GROQ_API_KEY}",
+                "User-Agent": HEADERS["User-Agent"],
             },
             method="POST",
         )
