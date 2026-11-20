@@ -53,6 +53,17 @@ GOOGLE_TOPICS = [
     "شستا",
     "بیمه شدگان",
     "قانون کار",
+    # موضوعات اولویت‌دار (کوتاه نگه داشته شده‌اند، رجوع کنید به توضیح بالا)
+    "ماده 96",
+    "ماده 54",
+    "هفت تپه",
+    "تجمع بازنشستگان",
+    "بازنشستگان اهواز",
+    "بازنشستگان کرمانشاه",
+    "بازنشستگان شوش",
+    "اموال تامین اجتماعی",
+    "درمان رایگان",
+    "افزایش حقوق بازنشستگان",
 ]
 
 # بازه‌ی زمانی جست‌وجو در Google News (این منبع فعلاً تکمیلی/غیرفعال است، رجوع کنید به یادداشت بالا).
@@ -143,6 +154,57 @@ HARD_EXCLUDE_KEYWORDS = [
 # مدل رایگان Groq که برای خلاصه‌سازی هم استفاده شده، تا نیازی به کلید یا
 # سرویس اضافه نباشد.
 RELEVANCE_JUDGE_MODEL = GROQ_MODEL
+
+# ---------------------------------------------------------------------------
+# نرمال‌سازی متن فارسی (برای اینکه ی/ي، ک/ك، نیم‌فاصله و ارقام فارسی/عربی
+# باعث از دست رفتن خبر نشوند)
+# ---------------------------------------------------------------------------
+_NORM_TABLE = str.maketrans({
+    "ي": "ی", "ى": "ی", "ك": "ک", "ۀ": "ه", "ة": "ه", "أ": "ا", "إ": "ا",
+    "ؤ": "و", "ـ": "", "\u200c": " ", "\u200f": " ", "\u200e": " ", "\u00a0": " ",
+    "۰": "0", "۱": "1", "۲": "2", "۳": "3", "۴": "4",
+    "۵": "5", "۶": "6", "۷": "7", "۸": "8", "۹": "9",
+    "٠": "0", "١": "1", "٢": "2", "٣": "3", "٤": "4",
+    "٥": "5", "٦": "6", "٧": "7", "٨": "8", "٩": "9",
+})
+
+
+def normalize_fa(text):
+    return re.sub(r"\s+", " ", (text or "").translate(_NORM_TABLE)).strip()
+
+
+# ---------------------------------------------------------------------------
+# موضوعات اولویت‌دار: خبری که با یکی از این قواعد جور شود
+#   ۱) حتماً «مرتبط» حساب می‌شود (حتی اگر کلیدواژه‌ی عمومی نداشته باشد)
+#   ۲) از فیلتر «رد سریع» (استاندار/افتتاح/...) و از داوری هوش مصنوعی معاف است
+# هر قاعده = فهرستی از الگوها که «همه» باید در متن (عنوان+چکیده) پیدا شوند.
+# ---------------------------------------------------------------------------
+_GROUP = r"بازنشست|مستمری|مستمر\s*بگیر"
+_TAMIN = r"تامین اجتماعی|سازمان تامین|شستا"
+PRIORITY_RULES = [
+    # ماده 96 / ماده 54 قانون تامین اجتماعی (افزایش حقوق، درمان رایگان)
+    [r"ماده\s*(?:ی\s*)?(?:96|54)\b", r"%s|%s|درمان|بیمه|حقوق" % (_TAMIN, _GROUP)],
+    # افزایش حقوق بازنشستگان متناسب با تورم/هزینه زندگی
+    [_GROUP, r"افزایش|تورم|هزینه\s*(?:های\s*)?زندگی|متناسب\s*سازی|همسان\s*سازی|سبد\s*معیشت|قدرت\s*خرید"],
+    # الزام درمان رایگان
+    [r"درمان\s*رایگان|رایگان\s*بودن\s*درمان|بیمه\s*درمان\s*رایگان", r"%s|%s|بیمه|درمان" % (_TAMIN, _GROUP)],
+    # فروش/واگذاری اموال و دارایی‌های تامین اجتماعی
+    [r"(?:فروش|واگذاری|مزایده|مولد\s*سازی|خصوصی\s*سازی)", r"اموال|دارایی|املاک|سهام|شرکت", _TAMIN],
+    [r"اموال|املاک", _TAMIN, r"فروش|واگذار|مزایده|مولد"],
+    # تجمع/اعتراض بازنشستگان در هر شهر
+    [r"تجمع|اعتراض|راهپیمایی|تحصن|اعتصاب|گردهمایی", _GROUP],
+    # هفت‌تپه همیشه اولویت دارد
+    [r"هفت\s*تپه"],
+    # شوش / کرخه / اهواز / کرمانشاه در کنار بازنشستگان یا کارگران
+    [r"شوش|کرخه|اهواز|کرمانشاه", r"%s|کارگر|تجمع|اعتراض|حقوق" % _GROUP],
+]
+_PRIORITY_COMPILED = [[re.compile(p) for p in rule] for rule in PRIORITY_RULES]
+
+
+def is_priority(item):
+    text = normalize_fa(f"{item.get('title', '')} {item.get('summary_raw', '')}")
+    return any(all(p.search(text) for p in rule) for rule in _PRIORITY_COMPILED)
+
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -498,9 +560,11 @@ def parse_items(xml_root, default_source=None):
 
 
 def is_relevant(item):
-    text = f"{item['title']} {item['summary_raw']}"
-    if any(b in text for b in BLOCK_KEYWORDS):
+    text = normalize_fa(f"{item['title']} {item['summary_raw']}")
+    if any(normalize_fa(b) in text for b in BLOCK_KEYWORDS):
         return False
+    if is_priority(item):
+        return True
     return any(p.search(text) for p in RELEVANT_PATTERNS)
 
 
@@ -529,8 +593,11 @@ def _ai_relevance_verdicts(candidates):
         "معیشت (حقوق، دستمزد، قدرت خرید، مستمری) یا درمان (بیمه، دارو، هزینه "
         "درمان) میلیون‌ها کارگر و بازنشسته‌ی سراسر کشور دارد.\n"
         "false بزن برای:\n"
-        "- اخبار محلیِ یک شهر/استان بدون اثر ملی (حتی اگر کلمه‌ی معیشت یا "
-        "کارگر در آن باشد، مثل مدیریت آب کشاورزی یک استان)\n"
+        "- اخبار محلیِ یک شهر/استان که ربطی به کارگران/بازنشستگان/تامین اجتماعی "
+        "ندارد (مثل مدیریت آب کشاورزی یک استان)\n"
+        "اما این‌ها را حتماً true بزن: هر خبری درباره‌ی تصمیمات و عملکرد سازمان "
+        "تامین اجتماعی، حقوق و مستمری بازنشستگان، بیمه و درمان بیمه‌شدگان، "
+        "و تجمع/اعتراض بازنشستگان یا کارگران در هر شهری.\n"
         "- اخبار تشریفاتی، مراسم، ورزشی یا نمادین (حتی با حضور کارگران)\n"
         "- تحلیل‌های کلی بدون خبر مشخص، آگهی یا شایعه‌ی بدون منبع رسمی\n\n"
         f"{numbered}\n\n"
@@ -576,38 +643,48 @@ def _ai_relevance_verdicts(candidates):
 
 
 def filter_nationally_significant(items):
-    """از میان خبرهایی که از is_relevant() عبور کرده‌اند، فقط مواردی را نگه
-    می‌دارد که واقعاً اثر ملی روی معیشت/درمان میلیون‌ها کارگر و بازنشسته
-    دارند — نه محلی، تشریفاتی یا مختص گروه/شهر خاص."""
+    """خروجی: (kept, decided_rejected)
+    kept             = خبرهایی که باید ارسال شوند
+    decided_rejected = خبرهایی که قطعاً رد شده‌اند (این‌ها «دیده‌شده» ثبت می‌شوند)
+    خبرهایی که نه ارسال شدند و نه قطعی رد (مثلاً چون API داوری خطا داد) در هیچ‌کدام
+    نیستند، تا اجرای بعدی دوباره امتحانشان کند (قبلاً برای همیشه می‌سوختند)."""
     if not items:
-        return items
+        return [], []
+
+    kept, rejected = [], []
+
+    # موضوعات اولویت‌دار: بدون هیچ فیلتر دیگری عبور می‌کنند
+    normal = []
+    for it in items:
+        if is_priority(it):
+            kept.append(it)
+        else:
+            normal.append(it)
 
     # گام رایگان و آفلاین: رد فوری موارد بدیهیِ تشریفاتی، بدون تماس با API
-    survivors = [
-        it for it in items
-        if not any(k in f"{it['title']} {it['summary_raw']}" for k in HARD_EXCLUDE_KEYWORDS)
-    ]
+    hard = [normalize_fa(k) for k in HARD_EXCLUDE_KEYWORDS]
+    survivors = []
+    for it in normal:
+        text = normalize_fa(f"{it['title']} {it['summary_raw']}")
+        if any(k in text for k in hard):
+            rejected.append(it)
+        else:
+            survivors.append(it)
 
     if not GROQ_API_KEY:
-        # بدون کلید Groq (که برای خلاصه‌سازی هم لازم است)، اصلاً این لایه
-        # فعال نیست؛ فقط همان رد سریع کلیدواژه‌ای بالا اعمال شده و بقیه‌ی
-        # موارد (بدون بررسی معنایی) عبور می‌کنند
-        return survivors
+        return kept + survivors, rejected
 
     verdicts = _ai_relevance_verdicts(survivors)
     if not verdicts:
-        # کلید تنظیم شده ولی خودِ تماس API شکست خورده (مثلاً قطعی سرویس Groq).
-        # چون هدف کاربر «کیفیت» است نه «کامل بودن»، در این حالت به‌جای پذیرفتنِ
-        # موارد مشکوک، همه‌ی آن‌ها رد می‌شوند.
-        print("[warn] چون داوری هوشمند در دسترس نبود، موارد مشکوک این دوره به‌صورت محافظه‌کارانه رد شدند")
-        return []
+        # API در دسترس نبود: این موارد نه ارسال می‌شوند و نه «دیده‌شده» ثبت می‌شوند
+        print("[warn] داوری هوشمند در دسترس نبود؛ موارد غیراولویت‌دار به اجرای بعدی موکول شدند")
+        return kept, rejected
 
-    # لاگ شفاف از تصمیم هوشمند برای هر خبر، تا کیفیت داوری قابل بررسی/ممیزی باشد
     for i, it in enumerate(survivors):
-        tag = "✅ مرتبط" if verdicts.get(i) else "❌ نامرتبط"
-        print(f"[debug] داوری هوشمند: {tag} — {it['title']}")
-
-    return [it for i, it in enumerate(survivors) if verdicts.get(i, False)]
+        ok = verdicts.get(i, False)
+        print(f"[debug] داوری هوشمند: {'✅ مرتبط' if ok else '❌ نامرتبط'} — {it['title']}")
+        (kept if ok else rejected).append(it)
+    return kept, rejected
 
 
 def dedupe_key(item):
@@ -804,7 +881,7 @@ def send_news_item(item):
 # اجرای اصلی
 # ---------------------------------------------------------------------------
 
-def _process_feed(label, raw, seen, new_items, default_source=None):
+def _process_feed(label, raw, seen, new_items, default_source=None, batch_keys=None):
     """پارس یک پاسخ RSS، فیلتر بر اساس ارتباط موضوعی، و افزودن آیتم‌های جدید. لاگ تشخیصی چاپ می‌کند."""
     # برخی سرورها (مثل ایلنا) قبل از "<?xml ...?>" یک فاصله/نیولاین اضافه می‌فرستند
     # که طبق استاندارد XML غیرمجاز است؛ حذفش می‌کنیم تا پارس شکست نخورد.
@@ -823,6 +900,8 @@ def _process_feed(label, raw, seen, new_items, default_source=None):
         # کمک به عیب‌یابی: نشان می‌دهد آیا واقعاً فید خالی بوده یا چیز غیرمنتظره برگشته
         print("[debug] نمونه‌ی پاسخ خام:", raw[:200])
 
+    if batch_keys is None:
+        batch_keys = set()
     kept = 0
     too_old = 0
     for raw_item in raw_items:
@@ -832,9 +911,10 @@ def _process_feed(label, raw, seen, new_items, default_source=None):
             too_old += 1
             continue
         key = dedupe_key(raw_item)
-        if key in seen:
+        if key in seen or key in batch_keys:
             continue
-        seen.add(key)
+        batch_keys.add(key)
+        raw_item["key"] = key
         new_items.append(raw_item)
         kept += 1
     print(f"[debug] «{label}»: {kept} خبر جدید و مرتبط بعد از فیلتر (و {too_old} خبر قدیمی‌تر از {MAX_NEWS_AGE_HOURS} ساعت کنار گذاشته شد)")
@@ -843,6 +923,7 @@ def _process_feed(label, raw, seen, new_items, default_source=None):
 def main():
     seen = load_seen()
     new_items = []
+    batch_keys = set()
 
     # منبع اصلی: فیدهای مستقیم خبرگزاری‌های ایرانی (بدون محدودیت ضدِ اسکرپینگ گوگل)
     for name, feed_url in DIRECT_RSS_FEEDS:
@@ -851,7 +932,7 @@ def main():
         except Exception as e:
             print(f"[warn] خطا در دریافت فید «{name}» ({feed_url}): {e}")
             continue
-        _process_feed(name, raw, seen, new_items, default_source=name)
+        _process_feed(name, raw, seen, new_items, default_source=name, batch_keys=batch_keys)
 
     # منبع تکمیلی: جست‌وجوی گوگل‌نیوز (ممکن است روی برخی سرورها خالی برگردد)
     for topic in GOOGLE_TOPICS:
@@ -860,10 +941,13 @@ def main():
         except Exception as e:
             print(f"[warn] خطا در دریافت Google News برای «{topic}»: {e}")
             continue
-        _process_feed(f"Google: {topic}", raw, seen, new_items)
+        _process_feed(f"Google: {topic}", raw, seen, new_items, batch_keys=batch_keys)
 
     before_count = len(new_items)
-    new_items = filter_nationally_significant(new_items)
+    new_items, rejected_items = filter_nationally_significant(new_items)
+    # فقط خبرهای ارسال‌شده یا قطعاً ردشده «دیده‌شده» ثبت می‌شوند
+    for it in new_items + rejected_items:
+        seen.add(it["key"])
     print(f"[debug] فیلتر اهمیت ملی: از {before_count} خبر، {len(new_items)} خبر واقعاً مرتبط با معیشت/درمان میلیون‌ها کارگر و بازنشسته باقی ماند")
 
     result_items = []
